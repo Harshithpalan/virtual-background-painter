@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AURA — Live Generative Background</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Martian+Mono:wght@200;300;400&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:     #06060a;
+  --panel:  #0c0c12;
+  --border: #1a1a26;
+  --border2:#252535;
+  --text:   #d8d4cc;
+  --muted:  #4a4860;
+  --accent: #c8a87a;
+}
+
+html, body { height: 100%; overflow: hidden; background: var(--bg); }
+
+body {
+  font-family: 'Martian Mono', monospace;
+  color: var(--text);
+  display: grid;
+  grid-template-rows: 52px 1fr 72px;
+  height: 100vh;
+}
+
+/* ── Subtle grain ───────────────────────────────── */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 128px;
+  opacity: 0.025;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ── HEADER ─────────────────────────────────────── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1.8rem;
+  background: rgba(6,6,10,0.9);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(12px);
+  position: relative;
+  z-index: 100;
+}
+
+.logo {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 1.7rem;
+  font-weight: 300;
+  letter-spacing: 0.35em;
+  color: var(--text);
+  font-style: italic;
+}
+
+.header-center {
+  font-size: 0.48rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.header-chips {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.chip {
+  font-size: 0.48rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 4px 11px;
+  border: 1px solid var(--border2);
+  border-radius: 1px;
+  color: var(--muted);
+  display: flex; align-items: center; gap: 5px;
+  transition: all 0.3s;
+}
+.chip .pip { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); transition: all 0.3s; }
+.chip.on { color: var(--accent); border-color: rgba(200,168,122,0.3); }
+.chip.on .pip { background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: blink 1.4s ease-in-out infinite; }
+@keyframes blink { 0%,100%{opacity:1}50%{opacity:0.3} }
+
+/* ── MAIN: full canvas ──────────────────────────── */
+.stage {
+  position: relative;
+  overflow: hidden;
+  background: #000;
+}
+
+/* All canvases stacked */
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Layer order */
+#bg-canvas    { z-index: 1; }  /* generative art background */
+#cam-feed     { z-index: 2; display: none; }  /* raw cam (hidden) */
+#comp-canvas  { z-index: 3; }  /* composited output */
+#ui-canvas    { z-index: 4; pointer-events: none; }  /* HUD overlays */
+
+video { display: none; }
+
+/* Motion intensity meter */
+.motion-meter {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  pointer-events: none;
+}
+
+.motion-label {
+  font-size: 0.42rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(200,168,122,0.5);
+}
+
+.motion-bar-wrap {
+  width: 90px;
+  height: 2px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.motion-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  width: 0%;
+  transition: width 0.12s ease;
+  box-shadow: 0 0 6px var(--accent);
+}
+
+/* Scene name overlay */
+.scene-name {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 10;
+  pointer-events: none;
+}
+.scene-title {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 1.1rem;
+  font-weight: 300;
+  font-style: italic;
+  color: rgba(216,212,204,0.5);
+  letter-spacing: 0.05em;
+  transition: color 0.4s;
+}
+.scene-sub {
+  font-size: 0.42rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: rgba(200,168,122,0.35);
+  margin-top: 2px;
+}
+
+/* Loading overlay */
+#loading {
+  position: absolute; inset: 0;
+  background: var(--bg);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 1.4rem;
+  z-index: 50;
+  transition: opacity 0.8s;
+}
+#loading.gone { opacity: 0; pointer-events: none; }
+
+.load-logo {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 3.5rem;
+  font-weight: 300;
+  letter-spacing: 0.4em;
+  font-style: italic;
+  color: var(--text);
+  opacity: 0;
+  animation: fadein 0.8s 0.3s ease forwards;
+}
+@keyframes fadein { to { opacity: 1; } }
+
+.load-msg {
+  font-size: 0.52rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.load-bar { width: 200px; height: 1px; background: var(--border2); overflow: hidden; }
+.load-fill { height: 100%; background: var(--accent); width: 0%; animation: lf 3s ease forwards; box-shadow: 0 0 8px var(--accent); }
+@keyframes lf { to { width: 100%; } }
+
+/* ── BOTTOM SCENE PICKER ───────────────────────── */
+.scene-bar {
+  background: rgba(6,6,10,0.96);
+  border-top: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 1.2rem;
+  overflow-x: auto;
+  position: relative;
+  z-index: 100;
+}
+.scene-bar::-webkit-scrollbar { display: none; }
+
+.scene-card {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 16px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: border-color 0.2s, opacity 0.2s;
+  opacity: 0.45;
+  position: relative;
+}
+.scene-card:hover { opacity: 0.75; }
+.scene-card.active { border-bottom-color: var(--accent); opacity: 1; }
+
+.scene-thumb {
+  width: 52px;
+  height: 32px;
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+.scene-thumb canvas {
+  position: static;
+  width: 52px;
+  height: 32px;
+  border-radius: 2px;
+}
+
+.scene-card-name {
+  font-size: 0.44rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/* Controls on right of scene bar */
+.bar-controls {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bar-btn {
+  font-family: 'Martian Mono', monospace;
+  font-size: 0.44rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  border: 1px solid var(--border2);
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 1px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.bar-btn:hover { border-color: var(--accent); color: var(--accent); }
+.bar-btn.on { border-color: var(--accent); color: var(--accent); }
+
+/* Slider */
+.slider-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.slider-lbl { font-size: 0.42rem; letter-spacing: 0.14em; color: var(--muted); white-space: nowrap; }
+input[type=range] {
+  -webkit-appearance: none;
+  width: 70px; height: 1px;
+  background: var(--border2);
+  outline: none;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px; height: 10px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">AURA</div>
+  <div class="header-center">Live Generative Background · Motion-Reactive</div>
+  <div class="header-chips">
+    <div class="chip" id="chip-cam"><div class="pip"></div><span id="chip-cam-txt">Offline</span></div>
+    <div class="chip" id="chip-seg"><div class="pip"></div><span id="chip-seg-txt">Segmenting</span></div>
+  </div>
+</header>
+
+<div class="stage" id="stage">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="bg-canvas"></canvas>
+  <canvas id="cam-feed"></canvas>
+  <canvas id="comp-canvas"></canvas>
+  <canvas id="ui-canvas"></canvas>
+
+  <div class="motion-meter">
+    <div class="motion-label">Motion</div>
+    <div class="motion-bar-wrap">
+      <div class="motion-bar-fill" id="motion-fill"></div>
+    </div>
+  </div>
+
+  <div class="scene-name">
+    <div class="scene-title" id="scene-title">Aurora Borealis</div>
+    <div class="scene-sub" id="scene-sub">Move to disturb the field</div>
+  </div>
+
+  <div id="loading">
+    <div class="load-logo">AURA</div>
+    <div class="load-msg" id="load-msg">Loading segmentation model…</div>
+    <div class="load-bar"><div class="load-fill"></div></div>
+  </div>
+</div>
+
+<div class="scene-bar" id="scene-bar">
+  <!-- Scene cards injected by JS -->
+  <div class="bar-controls">
+    <div class="slider-group">
+      <span class="slider-lbl">Blur edge</span>
+      <input type="range" id="sl-edge" min="0" max="20" value="8">
+    </div>
+    <div class="slider-group">
+      <span class="slider-lbl">Opacity</span>
+      <input type="range" id="sl-opacity" min="10" max="100" value="95">
+    </div>
+    <button class="bar-btn" id="btn-mirror">↔ Mirror</button>
+    <button class="bar-btn" id="btn-snap">📷 Capture</button>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════════════════
+const cfg = {
+  scene: 'aurora',
+  edgeBlur: 8,
+  fgOpacity: 0.95,
+  mirrored: true,
+  motionLevel: 0,
+};
+
+// ═══════════════════════════════════════════════════════════════
+// CANVAS SETUP
+// ═══════════════════════════════════════════════════════════════
+const video    = document.getElementById('video');
+const bgCvs    = document.getElementById('bg-canvas');
+const camCvs   = document.getElementById('cam-feed');
+const compCvs  = document.getElementById('comp-canvas');
+const bgCtx    = bgCvs.getContext('2d');
+const camCtx   = camCvs.getContext('2d');
+const compCtx  = compCvs.getContext('2d');
+
+let W = 0, H = 0;
+const offscreen = document.createElement('canvas'); // scratch
+const offCtx    = offscreen.getContext('2d');
+
+// ═══════════════════════════════════════════════════════════════
+// MOTION DETECTION (frame diff for reactivity)
+// ═══════════════════════════════════════════════════════════════
+const motionCvs = document.createElement('canvas');
+const motCtx    = motionCvs.getContext('2d', { willReadFrequently: true });
+const prevCvs   = document.createElement('canvas');
+const prevCtx   = prevCvs.getContext('2d', { willReadFrequently: true });
+let motionVal = 0;
+let prevFrame = null;
+
+function measureMotion() {
+  if (!W) return 0;
+  const dw = Math.floor(W / 4), dh = Math.floor(H / 4);
+  motionCvs.width = prevCvs.width = dw;
+  motionCvs.height = prevCvs.height = dh;
+  motCtx.drawImage(video, 0, 0, dw, dh);
+  const curr = motCtx.getImageData(0, 0, dw, dh);
+  if (!prevFrame || prevFrame.data.length !== curr.data.length) {
+    prevFrame = curr;
+    return 0;
+  }
+  let diff = 0;
+  for (let i = 0; i < curr.data.length; i += 4) {
+    diff += Math.abs(curr.data[i]   - prevFrame.data[i]);
+    diff += Math.abs(curr.data[i+1] - prevFrame.data[i+1]);
+    diff += Math.abs(curr.data[i+2] - prevFrame.data[i+2]);
+  }
+  prevFrame = curr;
+  return Math.min(1, diff / (dw * dh * 3 * 40));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SCENE REGISTRY
+// ═══════════════════════════════════════════════════════════════
+const SCENES = {};
+
+// ───────────────────────────────────────────────────────────────
+// 1. AURORA BOREALIS — flowing sine ribbons
+// ───────────────────────────────────────────────────────────────
+SCENES.aurora = (() => {
+  const ribbons = Array.from({length: 8}, (_, i) => ({
+    baseY: 0.15 + i * 0.1,
+    speed: 0.0003 + i * 0.00012,
+    amp:   0.04 + i * 0.025,
+    freq:  0.8 + i * 0.3,
+    phase: Math.random() * Math.PI * 2,
+    hue:   120 + i * 22,
+    alpha: 0.15 + Math.random() * 0.1,
+  }));
+  const stars = Array.from({length: 200}, () => ({
+    x: Math.random(), y: Math.random() * 0.5,
+    r: Math.random() * 1.2 + 0.3,
+    a: Math.random() * 0.8 + 0.2,
+    twinkle: Math.random() * Math.PI * 2,
+  }));
+  let t = 0;
+  return {
+    name: 'Aurora Borealis',
+    sub: 'Move to disturb the ribbons',
+    draw(ctx, w, h, motion, dt) {
+      t += dt;
+      // Deep sky
+      const sky = ctx.createLinearGradient(0, 0, 0, h);
+      sky.addColorStop(0, '#010814');
+      sky.addColorStop(0.6, '#020f1e');
+      sky.addColorStop(1, '#061228');
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, w, h);
+
+      // Stars
+      stars.forEach(s => {
+        s.twinkle += dt * 0.8;
+        const alpha = s.a * (0.6 + 0.4 * Math.sin(s.twinkle));
+        ctx.beginPath();
+        ctx.arc(s.x * w, s.y * h, s.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(200,220,255,${alpha})`;
+        ctx.fill();
+      });
+
+      // Ribbons
+      ribbons.forEach((r, i) => {
+        const motionShift = motion * 0.15 * (i % 2 === 0 ? 1 : -1);
+        ctx.beginPath();
+        ctx.lineWidth = 0;
+        const points = [];
+        for (let x = 0; x <= w; x += 4) {
+          const nx = x / w;
+          const y = (r.baseY + motionShift + r.amp * Math.sin(nx * r.freq * Math.PI * 2 + t * r.speed * 1000 + r.phase)) * h;
+          points.push({ x, y });
+        }
+        // Draw filled ribbon
+        const ribbonH = (0.02 + motion * 0.04) * h;
+        ctx.beginPath();
+        points.forEach(p => ctx.lineTo(p.x, p.y - ribbonH));
+        points.slice().reverse().forEach(p => ctx.lineTo(p.x, p.y + ribbonH));
+        ctx.closePath();
+        const g = ctx.createLinearGradient(0, 0, w, 0);
+        g.addColorStop(0,   `hsla(${r.hue},80%,60%,0)`);
+        g.addColorStop(0.2, `hsla(${r.hue},85%,65%,${r.alpha + motion * 0.15})`);
+        g.addColorStop(0.5, `hsla(${r.hue+20},90%,70%,${r.alpha * 1.4 + motion * 0.2})`);
+        g.addColorStop(0.8, `hsla(${r.hue},85%,65%,${r.alpha + motion * 0.15})`);
+        g.addColorStop(1,   `hsla(${r.hue},80%,60%,0)`);
+        ctx.fillStyle = g;
+        ctx.fill();
+      });
+    }
+  };
+})();
+
+// ───────────────────────────────────────────────────────────────
+// 2. PARTICLE STORM — flowing attracted particles
+// ───────────────────────────────────────────────────────────────
+SCENES.particles = (() => {
+  const COUNT = 600;
+  const particles = Array.from({length: COUNT}, () => ({
+    x: Math.random(), y: Math.random(),
+    vx: (Math.random() - 0.5) * 0.002,
+    vy: (Math.random() - 0.5) * 0.002,
+    life: Math.random(),
+    hue: Math.random() * 60 + 200, // blue-purple range
+    size: Math.random() * 2 + 0.5,
+  }));
+  let t = 0;
+  return {
+    name: 'Particle Storm',
+    sub: 'Motion spawns new particles',
+    draw(ctx, w, h, motion, dt) {
+      t += dt;
+      // Fade trail
+      ctx.fillStyle = 'rgba(4,4,16,0.2)';
+      ctx.fillRect(0, 0, w, h);
+
+      particles.forEach(p => {
+        // Flow field influence
+        const angle = Math.sin(p.x * 3 + t * 0.3) * Math.cos(p.y * 2.5 + t * 0.2) * Math.PI * 2;
+        const speed = 0.0006 + motion * 0.003;
+        p.vx += Math.cos(angle) * speed * 0.1;
+        p.vy += Math.sin(angle) * speed * 0.1;
+        // Dampen
+        p.vx *= 0.97; p.vy *= 0.97;
+        p.x  += p.vx + (Math.random() - 0.5) * 0.0005;
+        p.y  += p.vy;
+        p.life -= 0.003;
+
+        if (p.life <= 0 || p.x < 0 || p.x > 1 || p.y < 0 || p.y > 1) {
+          p.x = Math.random(); p.y = Math.random() < 0.3 ? 0 : Math.random();
+          p.vx = (Math.random()-0.5)*0.001; p.vy = Math.random()*0.002;
+          p.life = 0.6 + Math.random() * 0.4;
+          if (motion > 0.3) { p.hue = Math.random() * 360; p.size = Math.random() * 3 + 1; }
+          else { p.hue = Math.random() * 60 + 200; p.size = Math.random() * 2 + 0.5; }
+        }
+
+        const alpha = Math.min(1, p.life * 2) * (0.4 + motion * 0.4);
+        ctx.beginPath();
+        ctx.arc(p.x * w, p.y * h, p.size * (1 + motion), 0, Math.PI*2);
+        ctx.fillStyle = `hsla(${p.hue},80%,70%,${alpha})`;
+        ctx.fill();
+      });
+    }
+  };
+})();
+
+// ───────────────────────────────────────────────────────────────
+// 3. LAVA LAMP — slow morphing blobs
+// ───────────────────────────────────────────────────────────────
+SCENES.lava = (() => {
+  const blobs = Array.from({length: 7}, (_, i) => ({
+    x: Math.random(), y: Math.random(),
+    vx: (Math.random()-0.5)*0.0008, vy: -0.0004 - Math.random()*0.0006,
+    r: 0.08 + Math.random()*0.1,
+    hue: [15, 30, 200, 45, 0, 180, 280][i],
+    phase: Math.random() * Math.PI * 2,
+  }));
+  return {
+    name: 'Lava Lamp',
+    sub: 'Motion accelerates the blobs',
+    draw(ctx, w, h, motion, dt) {
+      // Background
+      ctx.fillStyle = '#0a0008';
+      ctx.fillRect(0, 0, w, h);
+
+      blobs.forEach(b => {
+        b.phase += dt * (0.5 + motion * 2);
+        b.x += b.vx + Math.sin(b.phase * 0.7) * 0.0005;
+        b.vy += -0.00002; // buoyancy
+        b.vy  = Math.max(-0.002, Math.min(0.002, b.vy));
+        b.y  += b.vy * (1 + motion * 3);
+        // Wrap
+        if (b.y + b.r < 0) { b.y = 1 + b.r; b.x = Math.random(); }
+        if (b.y - b.r > 1) { b.y = -b.r;    b.x = Math.random(); }
+        if (b.x < 0) b.x = 1; if (b.x > 1) b.x = 0;
+
+        const cx = b.x * w, cy = b.y * h;
+        const radius = b.r * w * (1 + Math.sin(b.phase * 0.4) * 0.15 + motion * 0.3);
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+        g.addColorStop(0,   `hsla(${b.hue},90%,65%,0.9)`);
+        g.addColorStop(0.5, `hsla(${b.hue+20},80%,55%,0.6)`);
+        g.addColorStop(1,   `hsla(${b.hue},70%,40%,0)`);
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI*2);
+        ctx.fill();
+      });
+    }
+  };
+})();
+
+// ───────────────────────────────────────────────────────────────
+// 4. FLOW FIELD — vector field with long trails
+// ───────────────────────────────────────────────────────────────
+SCENES.flow = (() => {
+  const COUNT = 350;
+  const agents = Array.from({length: COUNT}, () => ({
+    x: Math.random() * 2 - 0.5,
+    y: Math.random() * 2 - 0.5,
+    hue: Math.random() * 30 + 15,
+    life: Math.random(),
+    speed: 0.001 + Math.random() * 0.001,
+    trail: [],
+  }));
+  let t = 0;
+  return {
+    name: 'Flow Field',
+    sub: 'Motion warps the field',
+    draw(ctx, w, h, motion, dt) {
+      t += dt * (1 + motion * 2);
+      ctx.fillStyle = 'rgba(6,4,2,0.06)';
+      ctx.fillRect(0, 0, w, h);
+
+      agents.forEach(a => {
+        a.life -= 0.004;
+        if (a.life <= 0) {
+          a.x = Math.random(); a.y = Math.random();
+          a.life = 0.5 + Math.random() * 0.5;
+          a.trail = [];
+          a.hue = Math.random() * 60 + 10;
+        }
+        const angle =
+          Math.sin(a.x * 2.5 + t * 0.12) * Math.PI +
+          Math.cos(a.y * 3.0 + t * 0.09) * Math.PI +
+          motion * Math.sin(a.x * 5 + a.y * 5) * Math.PI;
+        a.x += Math.cos(angle) * a.speed * (1 + motion * 3);
+        a.y += Math.sin(angle) * a.speed * (1 + motion * 3);
+
+        a.trail.push({ x: a.x * w, y: a.y * h });
+        if (a.trail.length > 60) a.trail.shift();
+
+        if (a.trail.length < 2) return;
+        ctx.beginPath();
+        ctx.moveTo(a.trail[0].x, a.trail[0].y);
+        a.trail.forEach(p => ctx.lineTo(p.x, p.y));
+        ctx.strokeStyle = `hsla(${a.hue},85%,65%,${Math.min(1, a.life) * 0.45})`;
+        ctx.lineWidth = 0.8 + motion * 1.5;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      });
+    }
+  };
+})();
+
+// ───────────────────────────────────────────────────────────────
+// 5. GALAXY — spiral star clusters
+// ───────────────────────────────────────────────────────────────
+SCENES.galaxy = (() => {
+  const COUNT = 1200;
+  const stars = Array.from({length: COUNT}, (_, i) => {
+    const arm = Math.floor(Math.random() * 3);
+    const dist = Math.pow(Math.random(), 0.6) * 0.48;
+    const baseAngle = arm * (Math.PI * 2 / 3) + dist * 4;
+    const scatter = (Math.random() - 0.5) * 0.12;
+    const angle = baseAngle + scatter;
+    return {
+      x: 0.5 + Math.cos(angle) * dist,
+      y: 0.5 + Math.sin(angle) * dist * 0.5,
+      r: Math.random() * 1.5 + 0.2,
+      hue: dist < 0.15 ? 50 : 180 + Math.random() * 80,
+      alpha: 0.4 + Math.random() * 0.6,
+      twinkle: Math.random() * Math.PI * 2,
+      arm,
+      baseAngle: angle,
+      dist,
+      speed: (0.0001 + (1-dist) * 0.0003) * (arm % 2 === 0 ? 1 : -1),
+    };
+  });
+  const nebulae = Array.from({length: 6}, () => ({
+    x: Math.random(), y: Math.random(),
+    r: 0.08 + Math.random() * 0.1,
+    hue: Math.random() * 360,
+  }));
+  let t = 0;
+  return {
+    name: 'Galaxy',
+    sub: 'Motion creates gravitational waves',
+    draw(ctx, w, h, motion, dt) {
+      t += dt;
+      ctx.fillStyle = '#010208';
+      ctx.fillRect(0, 0, w, h);
+
+      // Nebulae
+      nebulae.forEach(n => {
+        const g = ctx.createRadialGradient(n.x*w, n.y*h, 0, n.x*w, n.y*h, n.r*w);
+        g.addColorStop(0, `hsla(${n.hue},60%,40%,0.15)`);
+        g.addColorStop(1, `hsla(${n.hue},60%,40%,0)`);
+        ctx.fillStyle = g;
+        ctx.fillRect(0,0,w,h);
+      });
+
+      stars.forEach(s => {
+        s.twinkle += dt * (0.8 + motion * 4);
+        s.baseAngle += s.speed * (1 + motion * 8);
+        const x = 0.5 + Math.cos(s.baseAngle) * s.dist;
+        const y = 0.5 + Math.sin(s.baseAngle) * s.dist * 0.5;
+        const alpha = s.alpha * (0.5 + 0.5 * Math.sin(s.twinkle));
+        ctx.beginPath();
+        ctx.arc(x * w, y * h, s.r * (1 + motion * 0.5), 0, Math.PI*2);
+        ctx.fillStyle = `hsla(${s.hue},70%,85%,${alpha})`;
+        ctx.fill();
+      });
+
+      // Central glow
+      const cx = w/2, cy = h/2;
+      const glow = ctx.createRadialGradient(cx,cy,0,cx,cy,w*0.12*(1+motion));
+      glow.addColorStop(0, `rgba(255,240,200,${0.3+motion*0.3})`);
+      glow.addColorStop(0.3, `rgba(180,160,255,${0.1+motion*0.1})`);
+      glow.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = glow;
+      ctx.fillRect(0,0,w,h);
+    }
+  };
+})();
+
+// ───────────────────────────────────────────────────────────────
+// 6. NEON GRID — synthwave retro geometry
+// ───────────────────────────────────────────────────────────────
+SCENES.neon = (() => {
+  const pulses = [];
+  let t = 0;
+  return {
+    name: 'Synthwave Grid',
+    sub: 'Motion sends pulses through the grid',
+    draw(ctx, w, h, motion, dt) {
+      t += dt;
+      // Sky gradient
+      const sky = ctx.createLinearGradient(0,0,0,h*0.6);
+      sky.addColorStop(0, '#0a0016');
+      sky.addColorStop(1, '#1a0040');
+      ctx.fillStyle = sky;
+      ctx.fillRect(0,0,w,h*0.6);
+      // Ground
+      ctx.fillStyle = '#08000e';
+      ctx.fillRect(0,h*0.6,w,h*0.4);
+
+      // Sun
+      const sunY = h * 0.42;
+      const sun = ctx.createRadialGradient(w/2,sunY,0,w/2,sunY,h*0.18);
+      sun.addColorStop(0,'rgba(255,100,50,0.95)');
+      sun.addColorStop(0.4,'rgba(255,50,150,0.7)');
+      sun.addColorStop(0.7,'rgba(150,0,255,0.3)');
+      sun.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle = sun; ctx.fillRect(0,0,w,h);
+
+      // Horizon stripes on sun
+      for (let i=1;i<=8;i++){
+        const ly = sunY - h*0.18 + (i/8)*h*0.36;
+        ctx.fillStyle='rgba(8,0,14,0.7)';
+        ctx.fillRect(0,ly,w,h*0.018);
+      }
+
+      // Perspective grid
+      const vx = w/2, vy = h*0.6;
+      const COLS = 14, ROWS = 12;
+      ctx.save();
+      ctx.strokeStyle = '#ff00cc';
+      ctx.lineWidth = 0.7;
+      ctx.shadowColor = '#ff00cc';
+      ctx.shadowBlur = 8;
+      // Horizontal lines
+      for (let r=0;r<=ROWS;r++){
+        const pct = r/ROWS;
+        const y = vy + pct*h*0.4;
+        const spreadX = w * 0.5 * (pct * 0.95 + 0.05);
+        ctx.beginPath();
+        ctx.moveTo(vx - spreadX, y);
+        ctx.lineTo(vx + spreadX, y);
+        // Pulse animation
+        const pulse = (t * 0.4 - r/ROWS) % 1;
+        if (pulse > 0 && pulse < 0.1) ctx.strokeStyle = `rgba(255,${Math.round(motion*200)},255,0.9)`;
+        else ctx.strokeStyle = `rgba(255,0,204,${0.3+motion*0.4})`;
+        ctx.stroke();
+      }
+      // Vertical lines
+      for (let c=0;c<=COLS;c++){
+        const pct = c/COLS;
+        const bx = (pct - 0.5) * w;
+        ctx.strokeStyle = `rgba(0,220,255,${0.25+motion*0.35})`;
+        ctx.shadowColor = '#00dcff';
+        ctx.beginPath();
+        ctx.moveTo(vx, vy);
+        ctx.lineTo(vx + bx, vy + h*0.4);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // Motion pulse rings on grid
+      if (motion > 0.15) {
+        pulses.push({ y: vy, life: 1.0, speed: 0.4+motion, w });
+      }
+      for (let i=pulses.length-1;i>=0;i--){
+        const p=pulses[i];
+        p.life -= dt * 1.2;
+        p.y += dt * h * p.speed * 0.8;
+        if (p.life<=0||p.y>vy+h*0.4) { pulses.splice(i,1); continue; }
+        const pct2=(p.y-vy)/(h*0.4);
+        const spreadX2=w*0.5*(pct2*0.95+0.05);
+        ctx.save();
+        ctx.strokeStyle=`rgba(255,255,0,${p.life*0.6})`;
+        ctx.lineWidth=2;
+        ctx.shadowColor='#ffff00';
+        ctx.shadowBlur=16;
+        ctx.beginPath();
+        ctx.moveTo(vx-spreadX2,p.y);
+        ctx.lineTo(vx+spreadX2,p.y);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Stars
+      for(let i=0;i<4;i++){
+        const sx=(Math.sin(t*0.3+i*1.3)*0.4+0.5)*w;
+        const sy=(Math.cos(t*0.2+i*0.9)*0.3+0.15)*h;
+        const g2=ctx.createRadialGradient(sx,sy,0,sx,sy,3+motion*4);
+        g2.addColorStop(0,'rgba(255,255,255,0.9)');
+        g2.addColorStop(1,'rgba(255,255,255,0)');
+        ctx.fillStyle=g2; ctx.fillRect(sx-6,sy-6,12,12);
+      }
+    }
+  };
+})();
+
+// ───────────────────────────────────────────────────────────────
+// Register all scene names and thumbnails
+// ───────────────────────────────────────────────────────────────
+const SCENE_LIST = [
+  { id:'aurora',    label:'Aurora' },
+  { id:'particles', label:'Particles' },
+  { id:'lava',      label:'Lava' },
+  { id:'flow',      label:'Flow Field' },
+  { id:'galaxy',    label:'Galaxy' },
+  { id:'neon',      label:'Synthwave' },
+];
+
+// Build scene bar cards
+const sceneBar = document.getElementById('scene-bar');
+const thumbCanvases = {};
+SCENE_LIST.forEach(s => {
+  const card = document.createElement('div');
+  card.className = `scene-card${s.id === cfg.scene ? ' active' : ''}`;
+  card.dataset.id = s.id;
+  const thumb = document.createElement('canvas');
+  thumb.width = 52; thumb.height = 32;
+  thumbCanvases[s.id] = thumb;
+  const thumbWrap = document.createElement('div');
+  thumbWrap.className = 'scene-thumb';
+  thumbWrap.appendChild(thumb);
+  const lbl = document.createElement('div');
+  lbl.className = 'scene-card-name';
+  lbl.textContent = s.label;
+  card.appendChild(thumbWrap);
+  card.appendChild(lbl);
+  card.addEventListener('click', () => switchScene(s.id));
+  sceneBar.insertBefore(card, document.querySelector('.bar-controls'));
+});
+
+function switchScene(id) {
+  cfg.scene = id;
+  document.querySelectorAll('.scene-card').forEach(c => c.classList.toggle('active', c.dataset.id === id));
+  const scene = SCENES[id];
+  document.getElementById('scene-title').textContent = scene.name;
+  document.getElementById('scene-sub').textContent = scene.sub;
+  // Reset bg
+  bgCtx.clearRect(0, 0, W, H);
+}
+
+// Animate thumbnails
+let thumbT = 0;
+function animateThumbs(dt) {
+  SCENE_LIST.forEach(s => {
+    const tc = thumbCanvases[s.id];
+    const tCtx = tc.getContext('2d');
+    SCENES[s.id].draw(tCtx, 52, 32, 0.1, dt * 0.5);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MEDIAPIPE SELFIE SEGMENTATION
+// ═══════════════════════════════════════════════════════════════
+const selfieSegmentation = new SelfieSegmentation({
+  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${f}`
+});
+selfieSegmentation.setOptions({ modelSelection: 1 });
+
+let lastSegMask = null;
+
+selfieSegmentation.onResults(results => {
+  if (!W) return;
+  lastSegMask = results.segmentationMask;
+});
+
+// ═══════════════════════════════════════════════════════════════
+// COMPOSITING — merge background art + foreground person
+// ═══════════════════════════════════════════════════════════════
+function composite() {
+  if (!lastSegMask || !W) return;
+  const threshold = 0.5;
+  const softness  = cfg.edgeBlur;
+
+  // Draw raw cam to off-screen
+  offCtx.save();
+  offCtx.translate(W, 0); offCtx.scale(-1, 1);
+  offCtx.drawImage(video, 0, 0, W, H);
+  offCtx.restore();
+
+  // Process segmentation mask pixel by pixel
+  const maskTmp = document.createElement('canvas');
+  maskTmp.width = W; maskTmp.height = H;
+  const mCtx = maskTmp.getContext('2d');
+  mCtx.drawImage(lastSegMask, 0, 0, W, H);
+  const maskData = mCtx.getImageData(0, 0, W, H);
+
+  const camData  = offCtx.getImageData(0, 0, W, H);
+  const bgData   = bgCtx.getImageData(0, 0, W, H);
+  const outData  = compCtx.createImageData(W, H);
+
+  const soft = softness / 100;
+
+  for (let i = 0; i < maskData.data.length; i += 4) {
+    const maskVal = maskData.data[i] / 255;
+    // Smoothstep
+    const lo = Math.max(0, threshold - soft);
+    const hi = Math.min(1, threshold + soft);
+    let alpha = maskVal < lo ? 0 : maskVal > hi ? 1 : (maskVal - lo) / (hi - lo);
+    alpha = alpha * alpha * (3 - 2 * alpha);
+    alpha *= cfg.fgOpacity;
+
+    // Blend foreground person over background art
+    outData.data[i]   = camData.data[i]   * alpha + bgData.data[i]   * (1 - alpha);
+    outData.data[i+1] = camData.data[i+1] * alpha + bgData.data[i+1] * (1 - alpha);
+    outData.data[i+2] = camData.data[i+2] * alpha + bgData.data[i+2] * (1 - alpha);
+    outData.data[i+3] = 255;
+  }
+
+  compCtx.putImageData(outData, 0, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MAIN ANIMATION LOOP
+// ═══════════════════════════════════════════════════════════════
+let lastTime = 0;
+function animLoop(ts) {
+  requestAnimationFrame(animLoop);
+  const dt = Math.min(0.05, (ts - lastTime) / 1000);
+  lastTime = ts;
+
+  if (!W) return;
+
+  // Measure motion
+  const rawMotion = measureMotion();
+  motionVal = motionVal * 0.85 + rawMotion * 0.15; // smooth
+  cfg.motionLevel = motionVal;
+
+  // Update motion meter
+  document.getElementById('motion-fill').style.width = `${Math.min(100, motionVal * 300)}%`;
+
+  // Draw background scene
+  SCENES[cfg.scene].draw(bgCtx, W, H, motionVal, dt);
+
+  // Composite
+  if (lastSegMask) composite();
+
+  // Animate thumbnails
+  animateThumbs(dt);
+}
+
+requestAnimationFrame(animLoop);
+
+// ═══════════════════════════════════════════════════════════════
+// CAMERA + MEDIAPIPE INIT
+// ═══════════════════════════════════════════════════════════════
+async function startCamera() {
+  document.getElementById('load-msg').textContent = 'Requesting camera…';
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+  });
+  video.srcObject = stream;
+  await new Promise(r => video.onloadedmetadata = r);
+  video.play();
+
+  W = video.videoWidth;
+  H = video.videoHeight;
+
+  bgCvs.width  = camCvs.width  = compCvs.width  = W;
+  bgCvs.height = camCvs.height = compCvs.height = H;
+  offscreen.width = W; offscreen.height = H;
+
+  document.getElementById('load-msg').textContent = 'Starting segmentation…';
+
+  // First result hides loading
+  let first = true;
+  selfieSegmentation.onResults(results => {
+    lastSegMask = results.segmentationMask;
+    if (first) {
+      first = false;
+      document.getElementById('loading').classList.add('gone');
+      document.getElementById('chip-cam').classList.add('on');
+      document.getElementById('chip-cam-txt').textContent = 'Live';
+      document.getElementById('chip-seg').classList.add('on');
+      document.getElementById('chip-seg-txt').textContent = 'Segmenting';
+    }
+  });
+
+  const mpCam = new Camera(video, {
+    onFrame: async () => { await selfieSegmentation.send({ image: video }); },
+    width: W, height: H
+  });
+  mpCam.start();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// UI CONTROLS
+// ═══════════════════════════════════════════════════════════════
+document.getElementById('sl-edge').addEventListener('input', function() {
+  cfg.edgeBlur = +this.value;
+});
+document.getElementById('sl-opacity').addEventListener('input', function() {
+  cfg.fgOpacity = +this.value / 100;
+});
+document.getElementById('btn-mirror').addEventListener('click', function() {
+  cfg.mirrored = !cfg.mirrored;
+  this.classList.toggle('on', cfg.mirrored);
+});
+document.getElementById('btn-snap').addEventListener('click', () => {
+  const snap = document.createElement('canvas');
+  snap.width = W; snap.height = H;
+  snap.getContext('2d').drawImage(compCvs, 0, 0);
+  snap.toBlob(blob => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `aura_${cfg.scene}_${Date.now()}.png`;
+    a.click();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// BOOT
+// ═══════════════════════════════════════════════════════════════
+window.addEventListener('load', async () => {
+  // Set initial scene label
+  document.getElementById('scene-title').textContent = SCENES[cfg.scene].name;
+  document.getElementById('scene-sub').textContent = SCENES[cfg.scene].sub;
+
+  try {
+    await startCamera();
+  } catch(err) {
+    document.getElementById('loading').innerHTML = `
+      <div style="font-family:'Cormorant Garamond',serif;font-size:2rem;font-style:italic;color:var(--text)">Camera Error</div>
+      <div style="font-family:'Martian Mono',monospace;font-size:0.55rem;color:var(--muted);letter-spacing:0.12em;margin-top:0.5rem">${err.message}</div>
+      <div style="font-family:'Martian Mono',monospace;font-size:0.5rem;color:var(--muted);margin-top:0.4rem;letter-spacing:0.1em">Allow camera access and reload</div>`;
+  }
+});
+</script>
+</body>
+</html>
